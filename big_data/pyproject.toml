@@ -17,6 +17,7 @@ dependencies = [
     "ipykernel>=6.29.0",
     "jupyterlab>=4.2.0",
     "pytest>=8.2.0",
+    "curl-cffi>=0.16.3",
 ]
 
 [build-system]
