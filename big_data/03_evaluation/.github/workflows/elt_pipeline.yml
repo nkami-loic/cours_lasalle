@@ -1,0 +1,65 @@
+# ============================================================
+# Pipeline ELT quotidien : Source (GCS) -> Bronze -> Silver -> Gold
+# ============================================================
+# Les 3 étapes sont dans UN SEUL job, exécutées séquentiellement :
+# si une étape échoue, les suivantes ne sont pas lancées (pas de
+# Silver calculée sur une Bronze incomplète). Un seul job évite aussi
+# de refaire checkout + authentification + installation 3 fois.
+name: Pipeline ELT Quotidien
+
+on:
+  workflow_dispatch:        # lancement manuel (utile pour tester)
+  schedule:
+    - cron: '0 0 * * *'     # tous les jours à minuit UTC
+
+jobs:
+  run-elt:
+    runs-on: ubuntu-latest
+
+    # Permissions requises pour Workload Identity Federation (OIDC) :
+    # GitHub fournit un jeton temporaire à Google Cloud, donc aucune clé
+    # JSON à stocker dans le dépôt (plus sûr).
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    # Variables pour que dlt (Python) trouve le projet BigQuery. Les
+    # credentials, eux, viennent de l'étape d'authentification ci-dessous.
+    env:
+      GOOGLE_CLOUD_PROJECT: lasalle-big-data
+      DESTINATION__BIGQUERY__CREDENTIALS__PROJECT_ID: lasalle-big-data
+
+    steps:
+      - name: Récupérer le code (Checkout)
+        uses: actions/checkout@v4
+
+      - name: Authentification Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/833312929773/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-actions-elt@lasalle-big-data.iam.gserviceaccount.com'
+
+      - name: Installation de Python et dlt
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # pip et non "uv add" : uv add exige un pyproject.toml, absent du livrable.
+      - run: |
+          pip install "dlt[bigquery,gs]"
+
+      # --- 🟢 ÉTAPE BRONZE : INGESTION ---
+      # dlt lit le JSON dans le bucket GCS et le charge tel quel dans
+      # bronze_products (write_disposition="replace" : relancer ne duplique pas).
+      - name: 1. Ingestion API vers Bronze
+        run: python ingestion/load_products.py
+
+      # --- ⚪ ÉTAPE SILVER : TRANSFORMATION ---
+      # La transformation est en SQL pur, exécutée dans BigQuery (approche ELT :
+      # on charge d'abord, on transforme ensuite là où sont les données).
+      # --use_legacy_sql=false : syntaxe GoogleSQL standard (SAFE_CAST, etc.)
+      - name: 2. Transformation Bronze vers Silver
+        run: bq query --use_legacy_sql=false --project_id=lasalle-big-data < transformations/silver.sql
+
+      # --- 🟡 ÉTAPE GOLD : AGRÉGATION ---
+      - name: 3. Agrégation Silver vers Gold
+        run: bq query --use_legacy_sql=false --project_id=lasalle-big-data < transformations/gold.sql
