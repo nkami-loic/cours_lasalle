@@ -36,23 +36,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # pip et non "uv add" : uv add exige un pyproject.toml, absent du livrable.
+    
       - run: |
           pip install "dlt[bigquery,gs]"
 
-      # --- 🟢 ÉTAPE BRONZE : INGESTION ---
-      # dlt lit le JSON dans le bucket GCS et le charge tel quel dans
-      # bronze_products (write_disposition="replace" : relancer ne duplique pas).
+
       - name: 1. Ingestion API vers Bronze
         run: python ingestion/load_products.py
 
-      # --- ⚪ ÉTAPE SILVER : TRANSFORMATION ---
-      # La transformation est en SQL pur, exécutée dans BigQuery (approche ELT :
-      # on charge d'abord, on transforme ensuite là où sont les données).
-      # --use_legacy_sql=false : syntaxe GoogleSQL standard (SAFE_CAST, etc.)
       - name: 2. Transformation Bronze vers Silver
         run: bq query --use_legacy_sql=false --project_id=lasalle-big-data < transformations/silver.sql
 
-      # --- 🟡 ÉTAPE GOLD : AGRÉGATION ---
       - name: 3. Agrégation Silver vers Gold
         run: bq query --use_legacy_sql=false --project_id=lasalle-big-data < transformations/gold.sql
