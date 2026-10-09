@@ -199,192 +199,7 @@ ORDER BY 1 DESC;
 <!-- _class: lead -->
 
 # Partie 3
-## Transformations SQL & Requêtes Planifiées
 
----
-
-## 🔄 Transformer avec du SQL natif BigQuery
-
-**Pas besoin d'un orchestrateur externe** pour la plupart des pipelines !
-
-```sql
--- Bronze → Silver : CREATE TABLE AS SELECT
-CREATE OR REPLACE TABLE `silver.events`
-PARTITION BY event_date CLUSTER BY user_id
-AS
-WITH deduped AS (
-  SELECT *,
-    ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY event_ts DESC) AS rn
-  FROM `bronze.raw_events`
-  WHERE device_os NOT IN ('UnknownOS')
-)
-SELECT event_id, PARSE_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', event_ts) AS event_ts,
-       DATE(...) AS event_date, user_id, event_type, SAFE_CAST(amount AS FLOAT64)
-FROM deduped WHERE rn = 1;
-```
-
----
-
-## ⏰ Scheduled Queries — L'automatisation sans serveur
-
-BigQuery peut exécuter une requête SQL **automatiquement** sur un calendrier.
-
-```
- Console BigQuery → Éditeur → "Planifier" → "Créer une requête planifiée"
-```
-
-| Paramètre | Exemple |
-|-----------|--------|
-| Récurrence | `Toutes les heures`, `Chaque jour à 02:00` |
-| Dataset cible | `silver` |
-| Table cible | `events` |
-| Mode écriture | `Overwrite` (reconstruction) ou `Append` (incrémental) |
-
-> ✅ Pas de VM, pas de Spark, pas de code Python — **juste du SQL planifié**
-
----
-
-## 🔄 Vues Matérialisées — Le rafraîchissement automatique
-
-Alternative aux Scheduled Queries pour les agrégations simples :
-
-```sql
-CREATE MATERIALIZED VIEW `gold.mv_daily_kpis`
-PARTITION BY report_date
-OPTIONS (
-  enable_refresh = true,
-  refresh_interval_minutes = 60
-)
-AS
-SELECT
-  DATE(event_ts)          AS report_date,
-  country,
-  COUNT(DISTINCT user_id) AS active_users,
-  SUM(amount)             AS revenue
-FROM `silver.events`
-GROUP BY 1, 2;
-```
-
-BigQuery **met à jour automatiquement** la vue à chaque modification de la source.
-
----
-
-## 🆚 Quel outil pour quel besoin ?
-
-| Besoin | Solution recommandée |
-|--------|--------------------|
-| Transformation simple, peu de logique | **Vue SQL** |
-| Agrégation Gold auto-actualisée | **Materialized View** |
-| Transformation complexe (dédup, typage) | **Scheduled Query** (nightly) |
-| Pipeline multi-tables, tests, lineage | **dbt** (outil avancé) |
-| Streaming temps réel | BigQuery Subscriptions / Pub/Sub |
-
----
-
-## 🧹 Qualité des données — Les problèmes fréquents
-
-Lors du **Lab 03**, vous avez découvert les problèmes typiques de la couche Bronze :
-
-| Problème | Exemple réel | Traitement Silver |
-|----------|-------------|------------------|
-| **Doublons** | `evt-002` présent 2 fois | `ROW_NUMBER() OVER (PARTITION BY event_id ...)` |
-| **Types incorrects** | `amount_str = '49.99'` (STRING) | `SAFE_CAST(amount_str AS FLOAT64)` |
-| **Valeurs invalides** | `device_os = 'UnknownOS'` | `WHERE device_os NOT IN ('UnknownOS')` |
-| **Pays inconnus** | `country = 'XX'` | `AND country != 'XX'` |
-| **Timestamps STRING** | `'2024-01-15T10:23:45Z'` | `PARSE_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', event_ts)` |
-| **Valeurs NULL** | `amount_str IS NULL` | Conservé comme `NULL FLOAT64` valide |
-
-> ⚠️ **Bronze ne filtre jamais** — c'est la responsabilité exclusive de **Silver**.
-
----
-
-## 🔁 Déduplication — Les patterns BigQuery
-
-### Pattern 1 : `ROW_NUMBER()` (plus flexible)
-
-```sql
-WITH deduped AS (
-  SELECT *,
-    ROW_NUMBER() OVER (
-      PARTITION BY event_id       -- clé de déduplication
-      ORDER BY event_ts DESC      -- garder le plus récent
-    ) AS rn
-  FROM `bronze.raw_events`
-)
-SELECT * EXCEPT(rn)
-FROM deduped
-WHERE rn = 1;  -- seul l'enregistrement le plus récent
-```
-
-### Pattern 2 : `QUALIFY` (syntaxe BigQuery moderne)
-
-```sql
-SELECT *
-FROM `bronze.raw_events`
-QUALIFY ROW_NUMBER() OVER (
-  PARTITION BY event_id
-  ORDER BY event_ts DESC
-) = 1;  -- équivalent, syntaxe plus concise
-```
-
-> ⚠️ `QUALIFY` n'est **pas supporté dans les Materialized Views** → utiliser `ROW_NUMBER()`.
-
----
-
-## 📊 Benchmark Partitionnement & Clustering
-
-Impact mesuré sur `silver.events` avec ~18 000 lignes (Lab 03 — Partie 5) :
-
-| Requête | Filtre appliqué | Bytes scannés | Coût estimé |
-|---------|----------------|--------------|-------------|
-| Full scan | Aucun | 100% | Référence |
-| Filtre sur partition | `WHERE event_date BETWEEN ...` | ~10-20% | ↓ 80-90% |
-| Partition + Cluster | `event_date = ... AND user_id = ...` | ~1-5% | ↓ 95-99% |
-
-```sql
--- ❌ Scan complet — éviter en production
-SELECT COUNT(*), SUM(amount) FROM `silver.events`;
-
--- ✅ Optimisé partition + cluster
-SELECT COUNT(*), SUM(amount)
-FROM `silver.events`
-WHERE event_date = '2024-01-15'  -- partition pruning → scan 1 seule partition
-  AND user_id = 'usr-42';         -- cluster pruning → scan les blocs pertinents
-```
-
-> 💡 **Règle** : 1 TB scanné = ~5$ on-demand. Partitionner sur la colonne de filtre la plus fréquente.
-
----
-
-## 💰 Coûts BigQuery — Comprendre la facturation
-
-BigQuery facture principalement sur les **bytes scannés** (mode on-demand) :
-
-```
-Coût = (Bytes scannés) × (5$ / TB)
-```
-
-### Optimisations à retenir
-
-| Technique | Réduction coût | Comment |
-|-----------|---------------|--------|
-| `PARTITION BY` | ↓ 80-90% | Limiter le scan à quelques partitions |
-| `CLUSTER BY` | ↓ 10-50% supplémentaire | Scan uniquement les blocs pertinents |
-| Sélection de colonnes | ↓ proportionnel | `SELECT col1, col2` au lieu de `SELECT *` |
-| `SAFE_CAST` | 0 coût | Évite les erreurs qui relancent la requête |
-
-```sql
--- Estimer le coût AVANT d'exécuter :
--- Cocher "Traitement requis" dans BigQuery avant de cliquer sur Exécuter
--- Ou utiliser : SELECT * FROM `silver.events` WHERE ...
--- → BigQuery affiche les bytes estimés en haut à droite
-```
-
----
-
-<!-- _class: lead -->
-
-# Partie 4
 ## Modélisation des données
 ### Kimball vs Dénormalisation BigQuery
 
@@ -392,7 +207,7 @@ Coût = (Bytes scannés) × (5$ / TB)
 
 ## 🌟 Le Modèle en Étoile (Kimball)
 
-Approche classique des **Data Warehouses RDBMS** (Redshift, Snowflake) :
+Approche classique d'architecture de base de données :
 
 ```
                     dim_date
@@ -454,6 +269,160 @@ JOIN products p ON o.product_id = p.product_id;
 > 💡 **Règle pratique** : Dénormaliser les tables Gold stables à fort volume de requêtes BI.
 
 ---
+<!-- _class: lead -->
+
+# Partie 4
+## Transformations SQL & Requêtes Planifiées
+
+---
+
+## 🔄 Vues Matérialisées — Le rafraîchissement automatique
+
+Alternative aux Scheduled Queries pour les agrégations simples :
+
+```sql
+CREATE MATERIALIZED VIEW `gold.mv_daily_kpis`
+PARTITION BY report_date
+OPTIONS (
+  enable_refresh = true,
+  refresh_interval_minutes = 60
+)
+AS
+SELECT
+  DATE(event_ts)          AS report_date,
+  country,
+  COUNT(DISTINCT user_id) AS active_users,
+  SUM(amount)             AS revenue
+FROM `silver.events`
+GROUP BY 1, 2;
+```
+
+BigQuery **met à jour automatiquement** la vue à chaque modification de la source.
+
+---
+
+## ⏰ Scheduled Queries — L'automatisation sans serveur
+
+BigQuery peut exécuter une requête SQL **automatiquement** sur un calendrier.
+
+```
+ Console BigQuery → Éditeur → "Planifier" → "Créer une requête planifiée"
+```
+
+| Paramètre | Exemple |
+|-----------|--------|
+| Récurrence | `Toutes les heures`, `Chaque jour à 02:00` |
+| Dataset cible | `silver` |
+| Table cible | `events` |
+| Mode écriture | `Overwrite` (reconstruction) ou `Append` (incrémental) |
+
+> ✅ Pas de VM, pas de Spark, pas de code Python — **juste du SQL planifié**
+
+---
+
+
+## 🆚 Quel outil pour quel besoin ?
+
+| Besoin | Solution recommandée |
+|--------|--------------------|
+| Transformation simple, peu de logique | **Vue SQL** |
+| Agrégation Gold auto-actualisée | **Materialized View** |
+| Transformation complexe (dédup, typage) | **Scheduled Query** (nightly) |
+| Pipeline multi-tables, tests, lineage | **dbt** (outil avancé) |
+
+---
+
+## 🧹 Qualité des données — Les problèmes fréquents
+
+Les problèmes typiques de la couche Bronze :
+
+| Problème | Exemple réel | Traitement Silver |
+|----------|-------------|------------------|
+| **Doublons** | valeur x  présente 2 fois | `ROW_NUMBER() OVER (PARTITION BY event_id ...)` |
+| **Types incorrects** | `amount_str = '49.99'` (STRING) | `SAFE_CAST(amount_str AS FLOAT64)` |
+| **Valeurs invalides** | `device_os = 'UnknownOS'` | `WHERE device_os NOT IN ('UnknownOS')` |
+| **Pays inconnus** | `country = 'XX'` | `AND country != 'XX'` |
+| **Timestamps STRING** | `'2024-01-15T10:23:45Z'` | `PARSE_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', event_ts)` |
+| **Valeurs NULL** | `amount_str IS NULL` | Conservé comme `NULL FLOAT64` valide |
+
+> ⚠️ **Bronze ne filtre jamais** — c'est la responsabilité exclusive de **Silver**.
+
+---
+
+## 🔁 Déduplication — Les patterns BigQuery
+
+### Pattern 1 : `ROW_NUMBER()` (plus flexible)
+```sql
+-- Étape 1 : Création d'une CTE (table temporaire) pour classer les doublons
+WITH deduped AS (
+  SELECT 
+    *,
+    -- ROW_NUMBER() attribue un numéro séquentiel unique (1, 2, 3...) à chaque ligne
+    ROW_NUMBER() OVER (
+      -- PARTITION BY : Regroupe les lignes par identifiant unique (délimite le périmètre des doublons)
+      PARTITION BY event_id       
+      ORDER BY event_ts DESC      
+    ) AS rn -- Colonne temporaire contenant le rang attribué
+  FROM `bronze.raw_events`
+)
+
+SELECT 
+  -- EXCEPT(rn) : Syntaxe BigQuery/DuckDB pour conserver toutes les colonnes 
+  -- d'origine tout en retirant la colonne technique 'rn' du résultat final
+  * EXCEPT(rn)
+FROM deduped
+-- On ne conserve que la première ligne de chaque groupe (le plus récent)
+WHERE rn = 1;
+```
+---
+
+## 📊 Benchmark Partitionnement
+
+Impact mesuré sur `silver.events` avec ~18 000 lignes :
+
+| Requête | Filtre appliqué | Bytes scannés | Coût estimé |
+|---------|----------------|--------------|-------------|
+| Full scan | Aucun | 100% | Référence |
+| Filtre sur partition | `WHERE event_date BETWEEN ...` | ~10-20% | ↓ 80-90% |
+
+```sql
+-- ❌ Scan complet — éviter en production
+SELECT COUNT(*), SUM(amount) FROM `silver.events`;
+
+-- ✅ Optimisé avec partition pruning
+SELECT COUNT(*), SUM(amount)
+FROM `silver.events`
+WHERE event_date = '2024-01-15';  -- partition pruning → scan 1 seule partition
+```
+
+
+---
+
+## 💰 Coûts BigQuery — Comprendre la facturation
+
+BigQuery facture principalement sur les **bytes scannés** (mode on-demand) :
+
+```
+Coût = (Bytes scannés) × (5$ / TB)
+```
+
+### Optimisations à retenir
+
+| Technique | Réduction coût | Comment |
+|-----------|---------------|--------|
+| `PARTITION BY` | ↓ 80-90% | Limiter le scan à quelques partitions |
+| Sélection de colonnes | ↓ proportionnel | `SELECT col1, col2` au lieu de `SELECT *` |
+| `SAFE_CAST` | 0 coût | Évite les erreurs qui relancent la requête |
+
+```sql
+-- Estimer le coût AVANT d'exécuter :
+-- Cocher "Traitement requis" dans BigQuery avant de cliquer sur Exécuter
+-- Ou utiliser : SELECT * FROM `silver.events` WHERE ...
+-- → BigQuery affiche les bytes estimés en haut à droite
+```
+
+---
+
 
 <!-- _class: lead -->
 
@@ -489,7 +458,6 @@ FROM {{ ref('int_user_sessions') }} -- 🔗 dbt gère la dépendance automatique
 GROUP BY 1
 ```
 
-> 🔬 **Démo live** : Exploration d'un projet dbt connecté à BigQuery
 
 ---
 
@@ -622,7 +590,7 @@ orders_with_items (10M lignes, items imbriqués)
 Bronze (Raw)           Silver (Propre)           Gold (Métier)
 ────────────           ───────────────           ─────────────
 JSON brut              Typé + nettoyé            Agrégé
-Partitionné            PARTITION BY + CLUSTER BY Prêt pour Looker
+Partitionné            PARTITION BY              Prêt pour Looker
 Jamais modifié         Scheduled Query (nightly) Scheduled Query (daily)
 ```
 
@@ -632,24 +600,11 @@ Jamais modifié         Scheduled Query (nightly) Scheduled Query (daily)
 | **Scheduled Queries** | Automatiser sans serveur ni orchestrateur |
 | **Materialized Views** | Agrégations Gold auto-actualisées |
 | **PARTITION BY** | Réduire les coûts de scan (↓ 80-90%) |
-| **CLUSTER BY** | Optimisation supplémentaire des filtres fréquents |
 | **SAFE_CAST** | Gérer les valeurs malformées sans erreur |
-| **ROW_NUMBER() OVER (PARTITION BY ...)** | Déduplication propre et fiable |
+| **ROW_NUMBER() OVER (PARTITION BY _)** | Déduplication propre et fiable |
 | **dbt** *(avancé)* | Orchestration, lineage, tests — outil pro |
 
 ---
-
-## ❓ Questions & Exercices
-
-### 💻 Lab 03 — Ce que vous allez faire :
-
-1. **Partie 0** : Créer les 3 datasets BigQuery (`bronze`, `silver`, `gold`)
-2. **Partie 1** : Créer `bronze.raw_events` et insérer des données avec doublons + invalides
-3. **Partie 2** : Transformer Bronze → Silver (typage, déduplication, filtrage)
-4. **Partie 3** : Créer une Materialized View Silver et comparer avec la table
-5. **Partie 4** : Créer `gold.daily_kpis` (KPIs quotidiens par pays / OS)
-6. **Partie 5** : Planifier une Scheduled Query Silver via Console BigQuery et CLI `bq`
-7. **Partie 6** : Benchmarker les bytes scannés : full scan vs partition vs cluster
 
 ### 🧠 Questions de réflexion :
 
