@@ -1,16 +1,9 @@
-# ============================================================
-# Pipeline ELT quotidien : Source (GCS) -> Bronze -> Silver -> Gold
-# ============================================================
-# Les 3 étapes sont dans UN SEUL job, exécutées séquentiellement :
-# si une étape échoue, les suivantes ne sont pas lancées (pas de
-# Silver calculée sur une Bronze incomplète). Un seul job évite aussi
-# de refaire checkout + authentification + installation 3 fois.
+
 name: Pipeline ELT Quotidien
 
 on:
   workflow_dispatch:        # lancement manuel (utile pour tester)
-  schedule:
-    - cron: '0 0 * * *'     # tous les jours à minuit UTC
+
 
 jobs:
   run-elt:
