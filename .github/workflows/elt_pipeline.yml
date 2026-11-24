@@ -1,0 +1,38 @@
+name: Pipeline ELT Quotidien
+
+on:
+  push:
+    branches: main
+
+jobs:
+  run-elt:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Récupérer le code (Checkout)
+        uses: actions/checkout@v4
+
+      - name: Authentification Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/833312929773/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-actions-elt@lasalle-big-data.iam.gserviceaccount.com'
+
+      - name: Installation de Python et dlt
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: |
+          pip install "dlt[bigquery,gs]"
+
+      - name: Ingestion API vers Bronze
+        run: python ingestion/load_products.py
+
+      - name: Transformation Bronze vers Silver
+        run: bq query --use_legacy_sql=false < transformations/silver.sql
+
+      - name: Agrégation Silver vers Gold
+        run: bq query --use_legacy_sql=false < transformations/gold.sql

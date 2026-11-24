@@ -23,7 +23,6 @@ footer: "La Salle "
 ---
 
 ## 1.  Le Flux de Données 🔄
-
 📥 **1. Collecte & Stockage**
 Ingestion brute des sources (APIs, logs, bases) ➔ *GCS / BigQuery Bronze*
 
