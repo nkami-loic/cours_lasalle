@@ -165,3 +165,21 @@ Pour valider votre activité, préparez les réponses aux questions suivantes po
    * Quel paramètre simulé dans le Défi 4 minimise le RTO ?
 2. **Fenêtre de maintenance :** Pourquoi la modification de certains paramètres (PITR, flags PostgreSQL, instance type) ne doit-elle **jamais** être réalisée en journée sur une base e-commerce ?
 3. **Architecture Cible :** Pourquoi préconise-t-on d'utiliser **Cloud SQL Auth Proxy** ou **Private Service Connect (PSC)** plutôt que de renseigner des IP autorisées (*Authorized Networks*) dans un environnement d'entreprise ?
+
+Reponse
+
+
+Mission 1 : audit visuel
+ 
+Mission 2 : sauvegardes et PITR
+1.	RPO réel : entre 03h00 et 16h12, on perd 13 h 12 min de commandes, définitivement.
+2.	Mécanisme : un snapshot est une photo figée à un instant T, il ne contient rien de ce qui s'est passé après. Le PITR restaure le dernier backup puis rejoue les journaux de transactions jusqu'à la seconde voulue
+
+Mission 3 : réplication
+Scénario	Mécanisme
+A : feu dans la zone, bascule automatique sans perte	Haute Disponibilité régionale (réplication synchrone vers une autre zone)
+B : 95 % de lectures, CPU saturé	Read Replica (on redirige les SELECT du catalogue)
+C : chaque commande en direct dans BigQuery	Réplication logique / Datastream (CDC)
+
+Mission 5 : la console
+Défi 1 : sauvegardes et PITR
