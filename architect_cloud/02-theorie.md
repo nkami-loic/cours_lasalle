@@ -109,31 +109,6 @@ def create_order(order: Order):
 
 ---
 
-
----
-## L'Alternative Applicative : Le *Transactional Outbox Pattern*
-
-Pour garantir l'atomicité sans double écriture réseau, on utilise la transaction ACID locale.
-
-```
-   [ API FastMarket ]
-           │
-           ▼  (Même Transaction ACID)
-   ┌───────────────────────────────────────────────┐
-   │ PostgreSQL                                    │
-   │  ├── INSERT INTO orders (...)                 │
-   │  └── INSERT INTO outbox_events (payload, ...) │
-   └───────────────────────────────────────────────┘
-           │
-           ▼ (Lecture asynchrone)
-   [ Message Relay / Debezium ] ──► [ Google Cloud Pub/Sub ] ──► [ BigQuery ]
-```
-
-* **Avantage** : Cohérence garantie. Si la commande échoue, l'événement `outbox` est annulé.
-* **Inconvénients** : Complexité de code, augmentation du volume d'écriture sur PostgreSQL et risque de saturation de la table *outbox* (*Table Bloat*).
-
----
-
 ## ⚡ La Solution Définitive : Le Change Data Capture (CDC)
 
 Le **CDC (Change Data Capture)** consiste à écouter les flux de modifications directement **au niveau du moteur de stockage**, sans modifier le code de l'application.
